@@ -1,0 +1,80 @@
+name: Adda247 Wayback Exfiltrate
+          
+on:
+  workflow_dispatch: # Allows manual start
+  schedule:
+    - cron: '0 */12 * * *' # Runs every 12 hours
+
+jobs:
+  download-and-upload:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+          
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+
+      - name: Setup Environment
+        run: |
+          git config --global user.name "Exfiltrator-Bot"
+          git config --global user.email "bot@ops.local"
+          mkdir -p downloads
+          
+      - name: Get Archive File List
+        run: |
+          # Targeting the specific jobs path on Adda247
+          DOMAIN="adda247.com/jobs"
+          curl -s "https://web.archive.org/cdx/search/cdx?url=$DOMAIN/*&output=text&fl=original&collapse=urlkey" | \
+          grep -E "\.pdf" > file_list.txt
+          echo "Found $(wc -l < file_list.txt) historical PDF links."
+
+      - name: Process and Upload
+        env:
+          GH_TOKEN: ${{ secrets.MY_GITHUB_PAT }} 
+        run: |
+          USER_NAME="karthik3259m-ops"
+          REPO_NAME="clawer"
+          REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${USER_NAME}/${REPO_NAME}.git"
+          
+          count=0
+          batch_size=50
+          
+          while read -r original_url; do
+            # Only process links related to your SSC interests to save time
+            if [[ "$original_url" =~ "ssc" || "$original_url" =~ "question-paper" ]]; then
+              
+              wayback_url="https://web.archive.org/web/20260000000000if_/$original_url"
+              file_name=$(basename "$original_url" | cut -d'?' -f1)
+              
+              # Skip if already exists
+              if [ -f "downloads/$file_name" ]; then continue; fi
+              
+              echo "📥 Downloading: $file_name"
+              curl -L --retry 2 -s -o "downloads/$file_name" "$wayback_url"
+              
+              # Small validation
+              if [ -s "downloads/$file_name" ]; then
+                ((count++))
+              else
+                rm "downloads/$file_name"
+              fi
+
+              # Batch Sync
+              if [ $count -ge $batch_size ]; then
+                git add downloads/
+                git commit -m "Exfiltrated batch: $count files"
+                git push $REMOTE_URL HEAD:main
+                count=0
+              fi
+            fi
+          done < file_list.txt
+
+          # Final Sync
+          git add downloads/
+          if ! git diff --cached --quiet; then
+            git commit -m "Final sync for this run"
+            git push $REMOTE_URL HEAD:main
+          fi
